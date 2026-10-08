@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>鹿児島市 3D交通量デジタルツイン</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- MapLibre GL JS -->
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; background: #0b132b; }
+    
+    .info-panel {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      z-index: 10;
+      background: rgba(255, 255, 255, 0.95);
+      padding: 16px 20px;
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+      max-width: 320px;
+      line-height: 1.5;
+    }
+    .info-panel h3 { margin: 0 0 6px 0; font-size: 16px; color: #1a73e8; }
+    .info-panel p { margin: 0 0 8px 0; font-size: 12px; color: #444; }
+    .legend {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+      font-size: 11px;
+      font-weight: bold;
+    }
+    .legend-item { display: flex; align-items: center; gap: 4px; }
+    .legend-color { width: 12px; height: 12px; border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<div class="info-panel">
+  <h3>鹿児島市 3D交通量ツイン</h3>
+  <p><strong>操作方法:</strong> トラックパッドの「2本指ドラッグ」またはマウスの「右ボタンドラッグ」で視点を回転・傾けることができます。</p>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-color" style="background: #1a73e8;"></div> 上り交通量（柱）</div>
+    <div class="legend-item"><div class="legend-color" style="background: #e53935;"></div> 下り交通量（柱）</div>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+  // 全国をカバーする日本のオープンベクタータイルスタイル
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: 'https://tile.openstreetmap.jp/styles/osm-bright-ja/style.json',
+    center: [130.5540, 31.5900], // 鹿児島市中心部（照国神社〜天文館付近）
+    zoom: 16,
+    pitch: 62, // 視点を大きく傾けて3D感を強調
+    bearing: -25
+  });
+
+  map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+  map.on('load', () => {
+    // 1. 建物の3D押し出し表示レイヤーを追加
+    if (map.getSource('openmaptiles')) {
+      map.addLayer({
+        'id': '3d-buildings',
+        'source': 'openmaptiles',
+        'source-layer': 'building',
+        'type': 'fill-extrusion',
+        'minzoom': 14,
+        'paint': {
+          'fill-extrusion-color': [
+            'interpolate',
+            ['linear'],
+            ['get', 'render_height'],
+            0, '#d8e2dc',
+            30, '#b8c0c8',
+            80, '#8d99ae'
+          ],
+          // 建物の高さデータ（ない場合はデフォルト15m）
+          'fill-extrusion-height': [
+            'case',
+            ['has', 'render_height'], ['get', 'render_height'],
+            15
+          ],
+          'fill-extrusion-base': [
+            'case',
+            ['has', 'render_min_height'], ['get', 'render_min_height'],
+            0
+          ],
+          'fill-extrusion-opacity': 0.85
+        }
+      });
+    }
+
+    // 2. 交通量データを「3D柱（ポリゴン）」として表現するためのデータ
+    // 各観測地点に、上り（青）と下り（赤）の2本の柱を隣接して配置します
+    function createPillarPolygon(centerLng, centerLat, radiusMeters, heightMeters, direction, meta) {
+      const coords = [];
+      const steps = 12;
+      // 経度・緯度のおおよそのメートル変換
+      const latOffset = radiusMeters / 111000;
+      const lngOffset = radiusMeters / (111000 * Math.cos(centerLat * Math.PI / 180));
+
+      for (let i = 0; i <= steps; i++) {
+        const angle = (i / steps) * 2 * Math.PI;
+        coords.push([
+          centerLng + lngOffset * Math.cos(angle),
+          centerLat + latOffset * Math.sin(angle)
+        ]);
+      }
+
+      return {
+        "type": "Feature",
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [coords]
+        },
+        "properties": {
+          "direction": direction,
+          "height": heightMeters, // 交通量に応じた高さ
+          "volume": meta.volume,
+          "name": meta.name,
+          "code": meta.code,
+          "large": meta.large,
+          "small": meta.small
+        }
+      };
+    }
+
+    // サンプル地点（国道3号・10号・225号）
+    const stations = [
+      {
+        lng: 130.5505, lat: 31.5912, name: "国道3号 平之町付近", code: "891001",
+        up: { small: 48, large: 8 }, down: { small: 52, large: 6 }
+      },
+      {
+        lng: 130.5590, lat: 31.5975, name: "国道10号 小川町付近", code: "891002",
+        up: { small: 62, large: 14 }, down: { small: 58, large: 11 }
+      },
+      {
+        lng: 130.5528, lat: 31.5835, name: "国道225号 甲突町付近", code: "891003",
+        up: { small: 35, large: 4 }, down: { small: 41, large: 5 }
+      }
+    ];
+
+    const pillarFeatures = [];
+
+    stations.forEach(st => {
+      const upTotal = st.up.small + st.up.large;
+      const downTotal = st.down.small + st.down.large;
+
+      // 交通量 1台 = 高さ 2.5メートル換算
+      // 上りの柱（少し西側にオフセット）
+      pillarFeatures.push(createPillarPolygon(
+        st.lng - 0.00015, st.lat, 10, upTotal * 2.5, '上り',
+        { name: st.name, code: st.code, volume: upTotal, small: st.up.small, large: st.up.large }
+      ));
+
+      // 下りの柱（少し東側にオフセット）
+      pillarFeatures.push(createPillarPolygon(
+        st.lng + 0.00015, st.lat, 10, downTotal * 2.5, '下り',
+        { name: st.name, code: st.code, volume: downTotal, small: st.down.small, large: st.down.large }
+      ));
+    });
+
+    // 3. 3D交通量ピラーレイヤーの追加
+    map.addSource('traffic-pillars', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: pillarFeatures
+      }
+    });
+
+    map.addLayer({
+      'id': 'traffic-pillars-3d',
+      'type': 'fill-extrusion',
+      'source': 'traffic-pillars',
+      'paint': {
+        // 上り＝青、下り＝赤
+        'fill-extrusion-color': [
+          'match',
+          ['get', 'direction'],
+          '上り', '#1a73e8',
+          '下り', '#e53935',
+          '#ffaa00'
+        ],
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.88
+      }
+    });
+
+    // 4. 柱をクリックしたときのポップアップ
+    map.on('click', 'traffic-pillars-3d', (e) => {
+      const p = e.features[0].properties;
+      const color = p.direction === '上り' ? '#1a73e8' : '#e53935';
+
+      const popupHtml = `
+        <div style="font-size:13px; min-width: 180px;">
+          <h4 style="margin:0 0 4px 0;">${p.name}</h4>
+          <div style="color:#666; font-size:11px; margin-bottom:6px;">観測点: ${p.code}</div>
+          <div style="font-weight:bold; color:${color}; font-size:14px; margin-bottom:4px;">
+            ${p.direction} 交通量: ${p.volume} 台/5分
+          </div>
+          <div style="font-size:12px; color:#444;">
+            ・小型車: ${p.small} 台<br>
+            ・大型車: ${p.large} 台
+          </div>
+        </div>
+      `;
+
+      new maplibregl.Popup({ offset: 15 })
+        .setLngLat(e.lngLat)
+        .setHTML(popupHtml)
+        .addTo(map);
+    });
+
+    map.on('mouseenter', 'traffic-pillars-3d', () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'traffic-pillars-3d', () => { map.getCanvas().style.cursor = ''; });
+  });
+</script>
+
+</body>
+</html>
